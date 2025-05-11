@@ -139,6 +139,13 @@ def cross_entropy_with_margin(logits, targets, margin=1.0):
     
     return (ce_loss * margin_mask).mean()
 
+def get_weight_norm(model):
+    norms = dict()
+    for n,p in model.named_parameters():
+        norms[n] = p.norm(2).item()
+    norms['global'] = sum([v**2 for v in norms.values()])**0.5
+    return norms
+
 # --------------------------
 #    ,-------------.
 #   (_\  CONFIG     \
@@ -164,12 +171,13 @@ def cfg():
     depth = 2
     activation = 'ReLU'
     
-    steps = 2500
-    batch_size = 1000
-    lr = 1e-3
+    steps = 16000
+    batch_size = 3000
+    lr = 5e-4
     weight_decay = 1e-2
     test_points = 3000
     test_points_per_task = 100
+
     stop_early = False
     
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -277,6 +285,7 @@ def run(n_tasks,
     ex.info['losses'] = list()
     ex.info['losses_subtasks'] = dict()
     ex.info['accuracies_subtasks'] = dict()
+    ex.info['weight_norm'] = list()
     for i in range(n_tasks):
         ex.info['losses_subtasks'][str(i)] = list()
         ex.info['accuracies_subtasks'][str(i)] = list()
@@ -314,6 +323,7 @@ def run(n_tasks,
             x, y_target = next(train_iter)
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
+        ex.info['weight_norm'].append(get_weight_norm(mlp))
         loss.backward()
 
 
