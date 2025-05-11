@@ -137,8 +137,8 @@ def cross_entropy_with_margin(logits, targets, margin=1.0):
     probs = F.softmax(logits, dim=1)
     predicted_probs = probs[torch.arange(probs.size(0)), targets]
     
-    # Only penalize if confidence is below the margin
-    margin_mask = (predicted_probs < margin).float()
+    # Soft masking of the loss with a sigmoid function to avoid discontinuities
+    margin_mask = torch.sigmoid((margin - predicted_probs) / 0.01)
     
     return (ce_loss * margin_mask).mean()
 
