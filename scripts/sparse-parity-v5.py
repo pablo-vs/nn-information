@@ -240,7 +240,7 @@ def cfg():
     target_param_type='weight'
     target_idx=(0, 0)
     exploration_lr=0.01
-    exploration_epochs=10
+    exploration_steps=1000
     temperature=1.0
     device=device
 
@@ -429,19 +429,19 @@ def train_model(
 
 @ex.capture
 def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_type, 
-                     target_idx, exploration_lr, exploration_epochs, temperature, device):
+                     target_idx, exploration_lr, temperature, device,
+                     loss_margin, lr, weight_decay, batch_size, exploration_steps):
     """Explore a single parameter space while freezing others."""
-    criterion = nn.CrossEntropyLoss()
-    print(model)
     
     # Freeze all parameters except the target one
     target_layer, actual_layer_idx = freeze_all_except_one(model, target_layer_idx, target_param_type, target_idx)
-    
+    loss_fn = lambda *x: cross_entropy_with_margin(*x, loss_margin)
+
     # Setup optimizer with only the unfrozen parameter
     if target_param_type == 'weight':
-        optimizer = optim.Adam([target_layer.weight], lr=exploration_lr)
+        optimizer = optim.AdamW([target_layer.weight], lr=exploration_lr)
     else:  # bias
-        optimizer = optim.Adam([target_layer.bias], lr=exploration_lr)
+        optimizer = optim.AdamW([target_layer.bias], lr=exploration_lr)
     
     # Lists to store parameter values and losses
     param_values = []
@@ -457,41 +457,36 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
     print(f"Starting parameter exploration. Initial value: {init_value:.6f}")
     
     # Training loop
-    for epoch in range(exploration_epochs):
-        model.train()
-        epoch_losses = []
+    model.train()
+    epoch_losses = []
+    
+    for step in range(exploration_steps):
+        inputs, targets = train_loader(batch_size)
+        inputs, targets = inputs.to(device), targets.to(device)
         
-        for inputs, targets in train_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            
-            # Forward pass
-            outputs = model(inputs)
-            loss = criterion(outputs, targets)
-            
-            # Backward and optimize
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            # Record the current value of the parameter and loss
-            if target_param_type == 'weight':
-                row, col = target_idx
-                current_param_value = target_layer.weight[row, col].item()
-            else:  # bias
-                current_param_value = target_layer.bias[target_idx].item()
-            
-            param_values.append(current_param_value)
-            epoch_losses.append(loss.item())
+        # Forward pass
+        outputs = model(inputs)
+        loss = loss_fn(outputs, targets)
         
-        # Average loss for this epoch
-        avg_loss = sum(epoch_losses) / len(epoch_losses)
-        losses.append(avg_loss)
+        # Backward and optimize
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
         
-        # Log to Sacred
-        _run.log_scalar('exploration.parameter_value', current_param_value, epoch)
-        _run.log_scalar('exploration.loss', avg_loss, epoch)
+        # Record the current value of the parameter and loss
+        if target_param_type == 'weight':
+            row, col = target_idx
+            current_param_value = target_layer.weight[row, col].item()
+        else:  # bias
+            current_param_value = target_layer.bias[target_idx].item()
         
-        print(f"Epoch {epoch+1}/{exploration_epochs}, Parameter: {current_param_value:.6f}, Loss: {avg_loss:.6f}")
+        param_values.append(current_param_value)
+        epoch_losses.append(loss.item())
+    
+    # Average loss for this epoch
+    avg_loss = sum(epoch_losses) / len(epoch_losses)
+    losses.append(avg_loss)
+        
     
     # Calculate and visualize Bayesian posterior
     param_grid, posterior = calculate_bayesian_posterior(param_values, losses, temperature)
