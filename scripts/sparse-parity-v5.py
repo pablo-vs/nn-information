@@ -20,9 +20,12 @@ from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
+import torch.optim as optim
 import torch.nn.functional as F
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
+import matplotlib.pyplot as plt
+
 ex = Experiment("sparse-parity-v4")
 ex.captured_out_filter = apply_backspaces_and_linefeeds
 
@@ -152,6 +155,46 @@ def get_param_vector(model):
 def get_param_distance(p1, p2):
     return torch.sqrt(((p1 - p2)**2).sum()).item()
 
+# Helper functions for parameter exploration
+def freeze_all_except_one(model, target_layer_idx, target_param_type, target_idx):
+    """Freezes all parameters except one specific parameter."""
+    # First, freeze everything
+    for param in model.parameters():
+        param.requires_grad = False
+    
+    # Find the target Linear layer (accounting for activation layers)
+    linear_layers = [i for i, m in enumerate(model) if isinstance(m, nn.Linear)]
+    actual_idx = linear_layers[target_layer_idx]
+    target_layer = model[actual_idx]
+    
+    # Make sure it's a Linear layer
+    assert isinstance(target_layer, nn.Linear), "Target layer must be Linear"
+    
+    # Get the target parameter
+    if target_param_type == 'weight':
+        row, col = target_idx
+        # Create a mask of zeros with the same shape as weight
+        mask = torch.zeros_like(target_layer.weight)
+        # Set the target position to 1
+        mask[row, col] = 1
+        # Apply the mask to the gradients during backward pass
+        target_layer.weight.register_hook(lambda grad: grad * mask)
+        # Enable gradients for the whole weight tensor
+        target_layer.weight.requires_grad = True
+    elif target_param_type == 'bias':
+        idx = target_idx
+        # Create a mask of zeros with the same shape as bias
+        mask = torch.zeros_like(target_layer.bias)
+        # Set the target position to 1
+        mask[idx] = 1
+        # Apply the mask to the gradients during backward pass
+        target_layer.bias.register_hook(lambda grad: grad * mask)
+        # Enable gradients for the whole bias tensor
+        target_layer.bias.requires_grad = True
+    
+    return target_layer, actual_idx
+
+
 # --------------------------
 #    ,-------------.
 #   (_\  CONFIG     \
@@ -176,11 +219,11 @@ def cfg():
     width = 100
     depth = 2
     activation = 'ReLU'
-    loss_margin = 1.0
+    loss_margin = 0.9
     
-    steps = 16000
+    steps = 20000
     batch_size = 3000
-    lr = 5e-4
+    lr = 1e-3
     weight_decay = 1e-2
     test_points = 3000
     test_points_per_task = 100
@@ -201,47 +244,15 @@ def cfg():
 #  |-|   |  O o *|
 # /___\  |o___O__|
 # --------------------------
-@ex.automain
-def run(n_tasks,
-        n,
-        k,
-        alpha,
-        offset,
-        D,
-        width,
-        depth,
-        activation,
-        loss_margin,
-        test_points,
-        test_points_per_task,
-        steps,
-        batch_size,
-        lr,
-        weight_decay,
-        stop_early,
-        device,
-        dtype,
-        log_freq,
-        verbose,
-        seed,
-        _log):
-
-    torch.set_default_dtype(dtype)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-
-    if activation == 'ReLU':
+@ex.capture
+def create_model(n_tasks, n, width, depth, activation, device):
+    if activation == 'relu':
         activation_fn = nn.ReLU
-    elif activation == 'Tanh':
+    elif activation == 'tanh':
         activation_fn = nn.Tanh
-    elif activation == 'Sigmoid':
-        activation_fn = nn.Sigmoid
     else:
-        assert False, f"Unrecognized activation function identifier: {activation}"
-
-    # create model
+        activation_fn = nn.ReLU  # Default
+    
     layers = []
     for i in range(depth):
         if i == 0:
@@ -252,11 +263,25 @@ def run(n_tasks,
         else:
             layers.append(nn.Linear(width, width))
             layers.append(activation_fn())
-    mlp = nn.Sequential(*layers).to(device)
-    _log.debug("Created model.")
-    _log.debug(f"Model has {sum(t.numel() for t in mlp.parameters())} parameters") 
-    ex.info['P'] = sum(t.numel() for t in mlp.parameters())
+    
+    return nn.Sequential(*layers).to(device)
 
+@ex.capture
+def prepare_data(
+        n_tasks,
+        n,
+        k,
+        alpha,
+        offset,
+        D,
+        test_points,
+        test_points_per_task,
+        batch_size,
+        device,
+        dtype,
+        seed,
+        _log):
+    
     Ss = []
     for _ in range(n_tasks * 10):
         S = tuple(sorted(list(random.sample(range(n), k))))
@@ -283,8 +308,52 @@ def run(n_tasks,
         train_loader = FastTensorDataLoader(train_x, train_y, batch_size=min(D, batch_size), shuffle=True)
         train_iter = cycle(train_loader)
         ex.info['D'] = D
+
+        def get_batch_fn():
+            return train_iter
     else:
         ex.info['D'] = steps * batch_size
+        
+        def get_batch_fn(batch_size):
+            samples = np.searchsorted(cdf, np.random.rand(batch_size,))
+            hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
+            return get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device=device, dtype=dtype)
+
+    train_loader = get_batch_fn()
+    test_loader = lambda: get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=test_batch_sizes, device=device, dtype=dtype)
+    per_task_test_loaders = [lambda: get_batch(n_tasks=n_tasks, n=n, Ss=[Ss[i]], codes=[i], sizes=[test_points_per_task], device=device, dtype=dtype) for i in range(n_tasks)]
+    return train_loader, test_loader, per_task_test_loaders
+
+@ex.capture
+def train_model(
+        _run,
+        model,
+        train_loader,
+        test_loader,
+        per_task_test_loaders,
+        loss_margin,
+        steps,
+        n_tasks,
+        lr,
+        weight_decay,
+        stop_early,
+        device,
+        dtype,
+        log_freq,
+        verbose,
+        seed,
+        _log):
+
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+
+    mlp = model
+    _log.debug("Created model.")
+    _log.debug(f"Model has {sum(t.numel() for t in mlp.parameters())} parameters") 
+    ex.info['P'] = sum(t.numel() for t in mlp.parameters())
 
     loss_fn = lambda *x: cross_entropy_with_margin(*x, loss_margin)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=lr, weight_decay=weight_decay)
@@ -307,13 +376,13 @@ def run(n_tasks,
     for step in tqdm(range(steps), disable=not verbose):
         if step % log_freq == 0:
             with torch.no_grad():
-                x_i, y_i = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=test_batch_sizes, device=device, dtype=dtype)
+                x_i, y_i = test_loader()
                 y_i_pred = mlp(x_i)
                 labels_i_pred = torch.argmax(y_i_pred, dim=1)
-                ex.info['accuracies'].append(torch.sum(labels_i_pred == y_i).item() / test_points) 
+                ex.info['accuracies'].append(torch.sum(labels_i_pred == y_i).item() / y_i.shape[0]) 
                 ex.info['losses'].append(loss_fn(y_i_pred, y_i).item())
-                for i in range(n_tasks):
-                    x_i, y_i = get_batch(n_tasks=n_tasks, n=n, Ss=[Ss[i]], codes=[i], sizes=[test_points_per_task], device=device, dtype=dtype)
+                for i, loader in enumerate(per_task_test_loaders):
+                    x_i, y_i = loader()
                     y_i_pred = mlp(x_i)
                     ex.info['losses_subtasks'][str(i)].append(loss_fn(y_i_pred, y_i).item())
                     labels_i_pred = torch.argmax(y_i_pred, dim=1)
@@ -329,12 +398,8 @@ def run(n_tasks,
                     break
                 early_stop_triggers = early_stop_triggers[-10:]
         optimizer.zero_grad()
-        if D == -1:
-            samples = np.searchsorted(cdf, np.random.rand(batch_size,))
-            hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
-            x, y_target = get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device=device, dtype=dtype)
-        else:
-            x, y_target = next(train_iter)
+
+        x, y_target = train_loader()
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         ex.info['weight_norm'].append(get_weight_norm(mlp))
@@ -347,7 +412,174 @@ def run(n_tasks,
             param_queue.pop(0)
 
         loss.backward()
-
-
         optimizer.step()
+
+    weights_path = f"model_weights_{_run._id}.pt"
+    torch.save(mlp.state_dict(), weights_path)
+    _run.add_artifact(weights_path)
+
+@ex.capture
+def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_type, 
+                     target_idx, exploration_lr, exploration_epochs, temperature, device):
+    """Explore a single parameter space while freezing others."""
+    criterion = nn.CrossEntropyLoss()
+    
+    # Freeze all parameters except the target one
+    target_layer, actual_layer_idx = freeze_all_except_one(model, target_layer_idx, target_param_type, target_idx)
+    
+    # Setup optimizer with only the unfrozen parameter
+    if target_param_type == 'weight':
+        optimizer = optim.Adam([target_layer.weight], lr=exploration_lr)
+    else:  # bias
+        optimizer = optim.Adam([target_layer.bias], lr=exploration_lr)
+    
+    # Lists to store parameter values and losses
+    param_values = []
+    losses = []
+    
+    # Get initial parameter value
+    if target_param_type == 'weight':
+        row, col = target_idx
+        init_value = target_layer.weight[row, col].item()
+    else:  # bias
+        init_value = target_layer.bias[target_idx].item()
+    
+    print(f"Starting parameter exploration. Initial value: {init_value:.6f}")
+    
+    # Training loop
+    for epoch in range(exploration_epochs):
+        model.train()
+        epoch_losses = []
+        
+        for inputs, targets in train_loader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            
+            # Forward pass
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            
+            # Backward and optimize
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            # Record the current value of the parameter and loss
+            if target_param_type == 'weight':
+                row, col = target_idx
+                current_param_value = target_layer.weight[row, col].item()
+            else:  # bias
+                current_param_value = target_layer.bias[target_idx].item()
+            
+            param_values.append(current_param_value)
+            epoch_losses.append(loss.item())
+        
+        # Average loss for this epoch
+        avg_loss = sum(epoch_losses) / len(epoch_losses)
+        losses.append(avg_loss)
+        
+        # Log to Sacred
+        _run.log_scalar('exploration.parameter_value', current_param_value, epoch)
+        _run.log_scalar('exploration.loss', avg_loss, epoch)
+        
+        print(f"Epoch {epoch+1}/{exploration_epochs}, Parameter: {current_param_value:.6f}, Loss: {avg_loss:.6f}")
+    
+    # Calculate and visualize Bayesian posterior
+    param_grid, posterior = calculate_bayesian_posterior(param_values, losses, temperature)
+    
+    # Create plots
+    fig = plt.figure(figsize=(12, 10))
+    
+    # Plot parameter trajectory
+    plt.subplot(2, 2, 1)
+    plt.plot(param_values)
+    plt.title(f'Parameter Value vs. Iteration (Layer {target_layer_idx}, {"Weight" if target_param_type=="weight" else "Bias"} {target_idx})')
+    plt.xlabel('Iteration')
+    plt.ylabel('Parameter Value')
+    
+    # Plot loss trajectory
+    plt.subplot(2, 2, 2)
+    plt.plot(losses)
+    plt.title('Loss vs. Epoch')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    
+    # Plot parameter distribution
+    plt.subplot(2, 2, 3)
+    plt.hist(param_values, bins=30, density=True, alpha=0.7)
+    plt.title('Parameter Value Distribution')
+    plt.xlabel('Parameter Value')
+    plt.ylabel('Frequency')
+    
+    # Plot Bayesian posterior
+    plt.subplot(2, 2, 4)
+    plt.plot(param_grid, posterior)
+    plt.title('Bayesian Posterior Distribution')
+    plt.xlabel('Parameter Value')
+    plt.ylabel('Posterior Probability')
+    
+    plt.tight_layout()
+    
+    # Save figure
+    fig_path = f"parameter_exploration_{_run._id}.png"
+    plt.savefig(fig_path)
+    _run.add_artifact(fig_path)
+    
+    # Save exploration data
+    exploration_data = {
+        'layer_idx': target_layer_idx,
+        'param_type': target_param_type,
+        'param_idx': target_idx,
+        'param_values': param_values,
+        'losses': losses,
+        'param_grid': param_grid.tolist(),
+        'posterior': posterior.tolist()
+    }
+    
+    import json
+    with open(f"exploration_data_{_run._id}.json", 'w') as f:
+        json.dump(exploration_data, f)
+    _run.add_artifact(f"exploration_data_{_run._id}.json")
+    
+    return exploration_data
+
+def calculate_bayesian_posterior(param_values, losses, temperature=1.0):
+    """Calculate Bayesian posterior distribution from parameter values and losses."""
+    # Convert to numpy arrays
+    param_array = np.array(param_values)
+    loss_array = np.array(losses)
+    
+    # Create a grid of parameter values for smooth plotting
+    param_min, param_max = np.min(param_array), np.max(param_array)
+    param_grid = np.linspace(param_min, param_max, 1000)
+    
+    # Interpolate losses to the grid
+    from scipy.interpolate import interp1d
+    loss_interpolator = interp1d(param_array, loss_array, kind='cubic', 
+                                fill_value='extrapolate')
+    loss_grid = loss_interpolator(param_grid)
+    
+    # Calculate unnormalized posterior using Boltzmann distribution
+    unnormalized_posterior = np.exp(-loss_grid / temperature)
+    
+    # Normalize to get probabilities
+    posterior = unnormalized_posterior / np.sum(unnormalized_posterior)
+    
+    return param_grid, posterior
+
+
+# Main experiment
+@ex.automain
+def run(_run, explore_params):
+    # Create model and prepare data
+    model = create_model()
+    train_loader = prepare_data()  # You'll need to implement this
+    
+    # Train the model
+    trained_model = train_model(model=model, train_loader=train_loader)
+    
+    # Optionally run parameter exploration
+    if explore_params:
+        explore_parameter(model=trained_model, train_loader=train_loader)
+    
+    return "Experiment completed successfully!"
 
