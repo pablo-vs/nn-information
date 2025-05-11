@@ -170,6 +170,7 @@ def cfg():
     width = 100
     depth = 2
     activation = 'ReLU'
+    loss_margin = 1.0
     
     steps = 16000
     batch_size = 3000
@@ -204,6 +205,7 @@ def run(n_tasks,
         width,
         depth,
         activation,
+        loss_margin,
         test_points,
         test_points_per_task,
         steps,
@@ -278,7 +280,7 @@ def run(n_tasks,
     else:
         ex.info['D'] = steps * batch_size
 
-    loss_fn = cross_entropy_with_margin
+    loss_fn = lambda *x: cross_entropy_with_margin(*x, loss_margin)
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=lr, weight_decay=weight_decay)
     ex.info['log_steps'] = list()
     ex.info['accuracies'] = list()
