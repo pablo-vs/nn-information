@@ -146,6 +146,12 @@ def get_weight_norm(model):
     norms['global'] = sum([v**2 for v in norms.values()])**0.5
     return norms
 
+def get_param_vector(model):
+    return torch.cat([param.clone().detach().view(-1) for param in model.parameters()])
+
+def get_param_distance(p1, p2):
+    return torch.sqrt(((p1 - p2)**2).sum()).item()
+
 # --------------------------
 #    ,-------------.
 #   (_\  CONFIG     \
@@ -288,6 +294,12 @@ def run(n_tasks,
     ex.info['losses_subtasks'] = dict()
     ex.info['accuracies_subtasks'] = dict()
     ex.info['weight_norm'] = list()
+    ex.info['param_distance'] = list()
+    for i in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
+        ex.info[f'step_dist_{i}'] = list()
+
+    param_queue = list()
+
     for i in range(n_tasks):
         ex.info['losses_subtasks'][str(i)] = list()
         ex.info['accuracies_subtasks'][str(i)] = list()
@@ -326,6 +338,13 @@ def run(n_tasks,
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         ex.info['weight_norm'].append(get_weight_norm(mlp))
+
+        param_queue.append(get_param_vector(mlp))
+        if len(param_queue) > 4096:
+            param_queue.pop(0)
+        for i in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
+            ex.info[f'step_dist_{i}'].append(get_param_distance(param_queue[-1], param_queue[-1-i]))
+
         loss.backward()
 
 
