@@ -295,7 +295,7 @@ def run(n_tasks,
     ex.info['accuracies_subtasks'] = dict()
     ex.info['weight_norm'] = list()
     ex.info['param_distance'] = list()
-    for i in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
+    for i in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
         ex.info[f'step_dist_{i}'] = list()
 
     param_queue = list()
@@ -340,10 +340,11 @@ def run(n_tasks,
         ex.info['weight_norm'].append(get_weight_norm(mlp))
 
         param_queue.append(get_param_vector(mlp))
+        for i in [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
+            if len(param_queue) > i:
+                ex.info[f'step_dist_{i}'].append(get_param_distance(param_queue[-1], param_queue[-1-i]))
         if len(param_queue) > 4096:
             param_queue.pop(0)
-        for i in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]:
-            ex.info[f'step_dist_{i}'].append(get_param_distance(param_queue[-1], param_queue[-1-i]))
 
         loss.backward()
 
