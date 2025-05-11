@@ -425,6 +425,7 @@ def train_model(
     weights_path = f"model_weights_{_run._id}.pt"
     torch.save(mlp.state_dict(), weights_path)
     _run.add_artifact(weights_path)
+    return mlp
 
 @ex.capture
 def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_type, 
