@@ -20,7 +20,7 @@ from tqdm.auto import tqdm
 
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 from sacred import Experiment
 from sacred.utils import apply_backspaces_and_linefeeds
 ex = Experiment("sparse-parity-v4")
@@ -126,6 +126,19 @@ def cycle(iterable):
         for x in iterable:
             yield x
 
+def cross_entropy_with_margin(logits, targets, margin=1.0):
+    # Original cross entropy
+    ce_loss = F.cross_entropy(logits, targets, reduction='none')
+    
+    # Get predicted class and its probability
+    probs = F.softmax(logits, dim=1)
+    predicted_probs = probs[torch.arange(probs.size(0)), targets]
+    
+    # Only penalize if confidence is below the margin
+    margin_mask = (predicted_probs < margin).float()
+    
+    return (ce_loss * margin_mask).mean()
+
 # --------------------------
 #    ,-------------.
 #   (_\  CONFIG     \
@@ -139,10 +152,10 @@ def cycle(iterable):
 # --------------------------
 @ex.config
 def cfg():
-    n_tasks = 100
+    n_tasks = 10
     n = 50
     k = 3
-    alpha = 1.5
+    alpha = 0
     offset = 0
 
     D = -1 # -1 for infinite data
@@ -151,12 +164,12 @@ def cfg():
     depth = 2
     activation = 'ReLU'
     
-    steps = 25000
-    batch_size = 10000
+    steps = 2500
+    batch_size = 1000
     lr = 1e-3
-    weight_decay = 0.0
-    test_points = 30000
-    test_points_per_task = 1000
+    weight_decay = 1e-2
+    test_points = 3000
+    test_points_per_task = 100
     stop_early = False
     
     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -257,7 +270,7 @@ def run(n_tasks,
     else:
         ex.info['D'] = steps * batch_size
 
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = cross_entropy_with_margin
     optimizer = torch.optim.AdamW(mlp.parameters(), lr=lr, weight_decay=weight_decay)
     ex.info['log_steps'] = list()
     ex.info['accuracies'] = list()
@@ -302,5 +315,7 @@ def run(n_tasks,
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         loss.backward()
+
+
         optimizer.step()
 
