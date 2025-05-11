@@ -236,6 +236,14 @@ def cfg():
     log_freq = max(1, steps // 1000)
     verbose=False
 
+    target_layer_idx=0
+    target_param_type='weight'
+    target_idx=(0, 0)
+    exploration_lr=0.01
+    exploration_epochs=10
+    temperature=1.0
+    device=device
+
 # --------------------------
 #  |-|    *
 #  |-|   _    *  __
@@ -279,8 +287,7 @@ def prepare_data(
         batch_size,
         device,
         dtype,
-        seed,
-        _log):
+        steps):
     
     Ss = []
     for _ in range(n_tasks * 10):
@@ -572,10 +579,10 @@ def calculate_bayesian_posterior(param_values, losses, temperature=1.0):
 def run(_run, explore_params):
     # Create model and prepare data
     model = create_model()
-    train_loader = prepare_data()  # You'll need to implement this
+    train_loader, test_loader, per_task_test_loaders = prepare_data()  # You'll need to implement this
     
     # Train the model
-    trained_model = train_model(model=model, train_loader=train_loader)
+    trained_model = train_model(model=model, train_loader=train_loader, test_loader=test_loader, per_task_test_loaders=per_task_test_loaders)
     
     # Optionally run parameter exploration
     if explore_params:
