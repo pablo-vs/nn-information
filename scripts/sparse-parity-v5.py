@@ -394,7 +394,7 @@ def train_model(
                     y_i_pred = mlp(x_i)
                     ex.info['losses_subtasks'][str(i)].append(loss_fn(y_i_pred, y_i).item())
                     labels_i_pred = torch.argmax(y_i_pred, dim=1)
-                    ex.info['accuracies_subtasks'][str(i)].append(torch.sum(labels_i_pred == y_i).item() / test_points_per_task)
+                    ex.info['accuracies_subtasks'][str(i)].append(torch.sum(labels_i_pred == y_i).item() / y_i.shape[0])
                 ex.info['log_steps'].append(step)
             if stop_early:
                 if step > 4000 and len(ex.info['losses']) >= 2 \
