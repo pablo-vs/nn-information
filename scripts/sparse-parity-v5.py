@@ -239,7 +239,7 @@ def cfg():
     target_layer_idx=0
     target_param_type='weight'
     target_idx=(0, 0)
-    exploration_lr=0.01
+    exploration_batch_size=1000
     exploration_steps=1000
     temperature=1.0
     device=device
@@ -429,7 +429,7 @@ def train_model(
 
 @ex.capture
 def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_type, 
-                     target_idx, exploration_lr, temperature, device,
+                     target_idx, exploration_batch_size, temperature, device,
                      loss_margin, lr, weight_decay, batch_size, exploration_steps):
     """Explore a single parameter space while freezing others."""
     
@@ -439,9 +439,9 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
 
     # Setup optimizer with only the unfrozen parameter
     if target_param_type == 'weight':
-        optimizer = optim.AdamW([target_layer.weight], lr=exploration_lr)
+        optimizer = optim.AdamW([target_layer.weight], lr=lr, weight_decay=weight_decay)
     else:  # bias
-        optimizer = optim.AdamW([target_layer.bias], lr=exploration_lr)
+        optimizer = optim.AdamW([target_layer.bias], lr=lr, weight_decay=weight_decay)
     
     # Lists to store parameter values and losses
     param_values = []
@@ -460,7 +460,7 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
     model.train()
     
     for step in range(exploration_steps):
-        inputs, targets = train_loader(batch_size)
+        inputs, targets = train_loader(exploration_batch_size)
         inputs, targets = inputs.to(device), targets.to(device)
         
         # Forward pass
