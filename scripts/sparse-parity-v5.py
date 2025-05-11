@@ -458,7 +458,6 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
     
     # Training loop
     model.train()
-    epoch_losses = []
     
     for step in range(exploration_steps):
         inputs, targets = train_loader(batch_size)
@@ -481,13 +480,8 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
             current_param_value = target_layer.bias[target_idx].item()
         
         param_values.append(current_param_value)
-        epoch_losses.append(loss.item())
-    
-    # Average loss for this epoch
-    avg_loss = sum(epoch_losses) / len(epoch_losses)
-    losses.append(avg_loss)
+        losses.append(loss.item())
         
-    
     # Calculate and visualize Bayesian posterior
     param_grid, posterior = calculate_bayesian_posterior(param_values, losses, temperature)
     
