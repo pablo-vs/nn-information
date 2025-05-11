@@ -177,20 +177,20 @@ def freeze_all_except_one(model, target_layer_idx, target_param_type, target_idx
         mask = torch.zeros_like(target_layer.weight)
         # Set the target position to 1
         mask[row, col] = 1
-        # Apply the mask to the gradients during backward pass
-        target_layer.weight.register_hook(lambda grad: grad * mask)
         # Enable gradients for the whole weight tensor
         target_layer.weight.requires_grad = True
+        # Apply the mask to the gradients during backward pass
+        target_layer.weight.register_hook(lambda grad: grad * mask)
     elif target_param_type == 'bias':
         idx = target_idx
         # Create a mask of zeros with the same shape as bias
         mask = torch.zeros_like(target_layer.bias)
         # Set the target position to 1
         mask[idx] = 1
-        # Apply the mask to the gradients during backward pass
-        target_layer.bias.register_hook(lambda grad: grad * mask)
         # Enable gradients for the whole bias tensor
         target_layer.bias.requires_grad = True
+        # Apply the mask to the gradients during backward pass
+        target_layer.bias.register_hook(lambda grad: grad * mask)
     
     return target_layer, actual_idx
 
@@ -432,6 +432,7 @@ def explore_parameter(_run, model, train_loader, target_layer_idx, target_param_
                      target_idx, exploration_lr, exploration_epochs, temperature, device):
     """Explore a single parameter space while freezing others."""
     criterion = nn.CrossEntropyLoss()
+    print(model)
     
     # Freeze all parameters except the target one
     target_layer, actual_layer_idx = freeze_all_except_one(model, target_layer_idx, target_param_type, target_idx)
