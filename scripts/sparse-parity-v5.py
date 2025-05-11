@@ -326,7 +326,7 @@ def prepare_data(
             hist, _ = np.histogram(samples, bins=n_tasks, range=(0, n_tasks-1))
             return get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=hist, device=device, dtype=dtype)
 
-    train_loader = get_batch_fn()
+    train_loader = get_batch_fn
     test_loader = lambda: get_batch(n_tasks=n_tasks, n=n, Ss=Ss, codes=list(range(n_tasks)), sizes=test_batch_sizes, device=device, dtype=dtype)
     per_task_test_loaders = [lambda: get_batch(n_tasks=n_tasks, n=n, Ss=[Ss[i]], codes=[i], sizes=[test_points_per_task], device=device, dtype=dtype) for i in range(n_tasks)]
     return train_loader, test_loader, per_task_test_loaders
