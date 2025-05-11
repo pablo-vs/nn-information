@@ -316,7 +316,7 @@ def prepare_data(
         train_iter = cycle(train_loader)
         ex.info['D'] = D
 
-        def get_batch_fn():
+        def get_batch_fn(batch_size):
             return train_iter
     else:
         ex.info['D'] = steps * batch_size
@@ -344,6 +344,7 @@ def train_model(
         lr,
         weight_decay,
         stop_early,
+        batch_size,
         device,
         dtype,
         log_freq,
@@ -406,7 +407,7 @@ def train_model(
                 early_stop_triggers = early_stop_triggers[-10:]
         optimizer.zero_grad()
 
-        x, y_target = train_loader()
+        x, y_target = train_loader(batch_size)
         y_pred = mlp(x)
         loss = loss_fn(y_pred, y_target)
         ex.info['weight_norm'].append(get_weight_norm(mlp))
